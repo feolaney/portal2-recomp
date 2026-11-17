@@ -653,3 +653,76 @@ RT_CHECK(posix_interleaved_stream_handles_stay_valid) {
     }
     cleanup();
 }
+
+RT_CHECK(tempnam_returns_freeable_unused_names_with_glibc_directory_and_prefix) {
+    strings_top = STR;
+    char directory[] = "/tmp/portal2-tempnam-XXXXXX";
+    assert(mkdtemp(directory));
+    const char *old = getenv("TMPDIR"); char *saved = old ? strdup(old) : NULL;
+    assert(!setenv("TMPDIR", directory, 1));
+    uint32_t prefix = gstr("longprefix"), dir = gstr("/does-not-exist");
+    uint32_t first = call("tempnam", 2, dir, prefix), second = call("tempnam", 2, dir, prefix);
+    assert(first && second && first != second);
+    char expected[PATH_MAX]; snprintf(expected, sizeof(expected), "%s/longp", directory);
+    assert(!strncmp(GPTR(first), expected, strlen(expected)));
+    assert(strlen(GPTR(first)) == strlen(expected) + 6);
+    assert(strcmp(GPTR(first), GPTR(second)));
+    assert(access(GPTR(first), F_OK) == -1 && errno == ENOENT);
+    rt_free(first); rt_free(second);
+    if (saved) { assert(!setenv("TMPDIR", saved, 1)); free(saved); } else assert(!unsetenv("TMPDIR"));
+    assert(!rmdir(directory));
+}
+
+const char *rt_map_tool_program(const char *file);
+RT_CHECK(puzzlemaker_launches_only_recognized_native_tools) {
+    assert(!strcmp(rt_map_tool_program("/game/bin/linux32/vbsp_linux"), "vbsp_linux"));
+    assert(!strcmp(rt_map_tool_program("vvis_linux"), "vvis_dll.so"));
+    assert(!strcmp(rt_map_tool_program("vrad_linux"), "vrad_dll.so"));
+    assert(!rt_map_tool_program("vbsp_linux_other"));
+    assert(!rt_map_tool_program("portal2_linux"));
+}
+
+RT_CHECK(puzzlemaker_child_writes_invalidate_parent_file_cache) {
+    setup();
+    char dir[PATH_MAX]; snprintf(dir, sizeof(dir), "%s/dir", user); assert(!mkdir(dir, 0755));
+    const char *path = game_path("dir/compiler-result.bsp");
+    assert(rt_access_cached(path, F_OK) == -1 && errno == ENOENT);
+    pid_t child = fork(); assert(child >= 0);
+    if (!child) { put(user, "dir/compiler-result.bsp", "compiled BSP"); _exit(0); }
+    assert(call("waitpid", 3, (uint32_t)child, 0u, 0u) == (uint32_t)child);
+    assert(rt_access_cached(path, F_OK) == 0);
+    char contents[32]; slurp(rt_read_path(path), contents, sizeof(contents));
+    assert(!strcmp(contents, "compiled BSP"));
+}
+
+extern _Atomic unsigned rt_sigchld_pending;
+void rt_signal_poll(CPU *c);
+static pid_t signal_child;
+static int signal_deliveries;
+static int child_probe(CPU *c, const char *name) {
+    if (strcmp(name, "__sigchld_probe")) return 0;
+    assert(R32(c->esp + 4) == 17);
+    int status;
+    assert(waitpid(signal_child, &status, WNOHANG) == signal_child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 23);
+    ++signal_deliveries; c->eax = 999; c->ebx = 888;
+    return 1;
+}
+RT_SHIM_PROVIDER(child_probe)
+RT_CHECK(puzzlemaker_sigchld_delivers_exit_status_and_preserves_cpu) {
+    strings_top = STR;
+    uint32_t action = 0x2001f000;
+    memset(GPTR(action), 0, 140);
+    W32(action, rt_dynamic_import("__sigchld_probe"));
+    assert(call("sigaction", 3, 17u, action, 0u) == 0);
+    signal_deliveries = 0;
+    signal_child = fork(); assert(signal_child >= 0);
+    if (!signal_child) _exit(23);
+    for (int i = 0; i < 1000 && !atomic_load(&rt_sigchld_pending); ++i) usleep(1000);
+    assert(atomic_load(&rt_sigchld_pending));
+    CPU c; rt_cpu_reset(&c); c.esp = 0x2001e000; c.eax = 123; c.ebx = 456;
+    CPU before = c;
+    rt_signal_poll(&c);
+    assert(signal_deliveries == 1 && !memcmp(&c, &before, sizeof(c)));
+    W32(action, 0); assert(call("sigaction", 3, 17u, action, 0u) == 0);
+}

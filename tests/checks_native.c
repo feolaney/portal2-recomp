@@ -65,3 +65,49 @@ RT_CHECK(change_accessor_declines_unknown_code) {
     assert(!handled);
     rt_free(block);
 }
+
+#include "posix.h"
+#include <ctype.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+int rt_native_open_for_write(CPU *c, uint32_t entry);
+static char expected_write_path[PATH_MAX];
+static int write_probe_calls;
+static int write_probe(CPU *c, const char *name) {
+    if (strcmp(name, "__native_write_probe")) return 0;
+    assert(R32(c->esp + 4) == 0x11223344);
+    assert(!strcmp(GPTR(R32(c->esp + 8)), expected_write_path));
+    assert(!strcmp(GPTR(R32(c->esp + 12)), "wb"));
+    assert(R32(c->esp + 16) == 0);
+    ++write_probe_calls; c->eax = 0x1234;
+    return 1;
+}
+RT_SHIM_PROVIDER(write_probe)
+
+RT_CHECK(puzzlemaker_writepath_canonicalizes_root_before_original_checks) {
+    char root[] = "/tmp/portal2-writepath-XXXXXX"; assert(mkdtemp(root));
+    char game[PATH_MAX], linux_root[PATH_MAX], user[PATH_MAX];
+    snprintf(game, sizeof(game), "%s/GameRoot", root); assert(!mkdir(game, 0755));
+    snprintf(linux_root, sizeof(linux_root), "%s/Linux", root); assert(!mkdir(linux_root, 0755));
+    snprintf(user, sizeof(user), "%s/User", root); assert(!rt_paths_init(game, linux_root, user));
+    snprintf(expected_write_path, sizeof(expected_write_path), "%s/sdk_content/maps/preview.log", rt_game_root());
+    char lower[PATH_MAX], canonical[PATH_MAX]; strcpy(lower, expected_write_path);
+    for (char *p = lower; *p; ++p) *p = (char)tolower((unsigned char)*p);
+    if (pathconf(game, _PC_CASE_SENSITIVE) == 0) {
+        assert(rt_canonical_game_path(lower, canonical));
+        assert(!strcmp(canonical, expected_write_path));
+        uint32_t path = rt_alloc((uint32_t)strlen(lower) + 1), mode = rt_alloc(3);
+        strcpy(GPTR(path), lower); strcpy(GPTR(mode), "wb");
+        CPU c; rt_cpu_reset(&c); c.esp = 0x2001e000;
+        W32(c.esp, 0x12345678); W32(c.esp + 4, 0x11223344); W32(c.esp + 8, path);
+        W32(c.esp + 12, mode); W32(c.esp + 16, 0);
+        write_probe_calls = 0;
+        assert(rt_native_open_for_write(&c, rt_dynamic_import("__native_write_probe")));
+        assert(c.eax == 0x1234 && c.eip == 0x12345678 && c.esp == 0x2001e004);
+        assert(write_probe_calls == 1 && !strcmp(GPTR(path), lower));
+        rt_free(path); rt_free(mode);
+    } else assert(!rt_canonical_game_path(lower, canonical));
+    assert(!rt_canonical_game_path("/etc/passwd", canonical));
+    assert(!rmdir(user)); assert(!rmdir(linux_root)); assert(!rmdir(game)); assert(!rmdir(root));
+}

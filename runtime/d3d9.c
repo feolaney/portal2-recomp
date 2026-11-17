@@ -136,7 +136,7 @@ static void *host_metal_layer(void *user, void *hwnd, uint32_t *width, uint32_t 
 }
 
 // Mémoire adressable par le jeu : pages invitées projetées par rt_mmap (zone
-// 0x21000000-0x70000000), alignées sur la page hôte (16 Kio). La table des
+// 0x30000000-0x70000000), alignées sur la page hôte (16 Kio). La table des
 // projections est protégée par le verrou invité : rt_guest_enter est
 // réentrant, il est donc pris ici que l'appelant le tienne déjà ou non.
 static void *host_alloc_app(void *user, size_t size, size_t align) {

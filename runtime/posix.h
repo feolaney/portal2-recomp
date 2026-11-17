@@ -60,3 +60,12 @@ int rt_path_absolute(const char *path, char out[PATH_MAX]);   // chemin hôte ab
 uint32_t rt_vm_mapped_bytes(void);   // diagnostic (vm.c)
 int rt_vm_describe(uint32_t address, char *out, size_t size);   // diagnostic de faute (vm.c)
 int rt_access_cached(const char *path, int mode);   // 0, -1 (errno), -2 non mémorisable
+
+// Canonical overlay roots, shared with native compiler child processes.
+const char *rt_user_root(void);
+const char *rt_game_root(void);
+const char *rt_linux_root(void);
+
+int rt_canonical_game_path(const char *path, char output[PATH_MAX]);
+
+void rt_paths_invalidate(void);

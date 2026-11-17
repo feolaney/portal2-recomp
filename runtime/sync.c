@@ -10,9 +10,9 @@
 // Signals: this runtime never delivers asynchronous signals to guest code.
 // Dispositions and masks are recorded with the Linux i386 layouts; SIG_IGN and
 // SIG_DFL are applied to the host for the signals whose meaning is identical.
-// A guest handler is accepted only for SIGCHLD (the runtime creates no child
-// process able to raise it); any other guest handler traps.
+// SIGCHLD is deferred to a guest call boundary; other guest handlers trap.
 #include "rt.h"
+#include "modules.h"
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
@@ -152,6 +152,24 @@ static int host_signal(uint32_t signal) {
 }
 static uint64_t kernel_set(const uint8_t *set) { uint64_t v; memcpy(&v, set, 8); return v; }
 
+_Atomic unsigned rt_sigchld_pending;
+static void child_signal(int signal_number) {
+    (void)signal_number;
+    atomic_store_explicit(&rt_sigchld_pending, 1, memory_order_relaxed);
+}
+void rt_signal_poll(CPU *c) {
+    if (blocked & (UINT64_C(1) << 16)) return;
+    if (!atomic_exchange_explicit(&rt_sigchld_pending, 0, memory_order_relaxed)) return;
+    pthread_mutex_lock(&signal_lock);
+    uint32_t handler = dispositions[17].handler;
+    pthread_mutex_unlock(&signal_lock);
+    if (handler <= 1) return;
+    CPU saved = *c;
+    uint32_t args[] = {17};
+    rt_invoke(c, handler, args, 1);
+    *c = saved;
+}
+
 static int signal_shim(CPU *c, const char *name) {
     if (!strcmp(name, "sigemptyset")) {
         memset(rt_write_span(c, argument(c, 0), SIGSET_SIZE), 0, SIGSET_SIZE); c->eax = 0;
@@ -186,9 +204,12 @@ static int signal_shim(CPU *c, const char *name) {
         Disposition previous = dispositions[signal];
         if (act) {
             int host = host_signal(signal);
-            if (host && next.handler <= 1) {
+            if (host) {
                 struct sigaction native; memset(&native, 0, sizeof(native));
-                native.sa_handler = next.handler ? SIG_IGN : SIG_DFL;
+                if (next.handler > 1) {
+                    native.sa_handler = child_signal;
+                    native.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+                } else native.sa_handler = next.handler ? SIG_IGN : SIG_DFL;
                 if (sigaction(host, &native, NULL)) { pthread_mutex_unlock(&signal_lock); rt_save_errno(c); c->eax = UINT32_MAX; return 1; }
             }
             dispositions[signal] = next;

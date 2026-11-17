@@ -45,6 +45,30 @@ class DispatchTableTests(unittest.TestCase):
             result = subprocess.run([str(Path(tmp) / 't')], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_executable_copy_relocations_follow_import_initialization(self):
+        layout = dict(modules=[FAKE_MODULE], imports=[],
+                      data_imports=[dict(name='stdout', addr=32, size=4)],
+                      copy_relocations=[dict(address=16, source=32, size=4)])
+        dispatch = lift.dispatch_source(layout, [("named", 0x10000010)], {}, [0x10000010])
+        harness = r'''#include "rt.h"
+uint8_t bytes[64], *M = bytes;
+void fn_10000010(CPU *c) { (void)c; }
+int rt_load_segment(const char *d,const char *n,uint32_t o,uint32_t a,uint32_t f,uint32_t m)
+{ (void)d;(void)n;(void)o;(void)a;(void)f;(void)m;return 0; }
+int rt_register_tls(const char *d,const char *n,uint32_t i,uint32_t o,uint32_t f,uint32_t m,uint32_t a)
+{ (void)d;(void)n;(void)i;(void)o;(void)f;(void)m;(void)a;return 0; }
+int rt_init_import_data(const char *n,uint32_t a,uint32_t s)
+{ (void)n;(void)s;uint32_t value=0x12345678;memcpy(M+a,&value,4);return 0; }
+int main(void) { if(rt_load_images("unused"))return 1;uint32_t value;memcpy(&value,M+16,4);return value!=0x12345678; }
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'dispatch.c'
+            source.write_text(dispatch + harness)
+            binary = Path(tmp) / 'check'
+            subprocess.run(['clang', '-O1', '-Wall', '-Wextra', '-Werror', f'-I{ROOT / "runtime"}',
+                            str(source), '-o', str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
     def test_shard_depends_only_on_guest_address_range(self):
         self.assertEqual(lift.shard_name(FAKE_MODULE, 0x10000000), lift.shard_name(FAKE_MODULE, 0x1001ffff))
         self.assertNotEqual(lift.shard_name(FAKE_MODULE, 0x1001ffff), lift.shard_name(FAKE_MODULE, 0x10020000))

@@ -221,8 +221,11 @@ static int run_shim(CPU *c, const char *name, const RtShimRoute *route, RtShimRo
     return handled;
 }
 
+extern _Atomic unsigned rt_sigchld_pending;
+void rt_signal_poll(CPU *c);
 void rt_dispatch(CPU *c, uint32_t target) {
     rt_guest_poll();
+    if (atomic_load_explicit(&rt_sigchld_pending, memory_order_relaxed)) rt_signal_poll(c);
     c->eip = target;
     gfn fn = target < RT_IMPORT_BASE ? rt_lookup(target) : NULL;
     // Pas une fonction des modules préparés : peut-être un greffon PE traduit

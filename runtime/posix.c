@@ -6,7 +6,7 @@
 // renommer un répertoire original renvoie EXDEV, comme overlayfs.
 // SHIMS: mkdir rmdir unlink remove rename chmod chown lchown link symlink realpath
 // SHIMS: scandir scandir64 alphasort alphasort64 readdir64 statfs statfs64 statvfs statvfs64
-// SHIMS: ftruncate fdopen freopen tmpfile tmpnam mkstemp mkfifo creat dup dup2 pipe
+// SHIMS: ftruncate fdopen freopen tmpfile tmpnam tempnam mkstemp mkfifo creat dup dup2 pipe
 // SHIMS: pathconf faccessat futimes utimes flock __xmknod setvbuf ungetc getwc ungetwc
 // SHIMS: putwc putchar writev ioctl
 #include "posix.h"
@@ -508,6 +508,31 @@ static int posix_shim(CPU *c, const char *name) {
                 out = internal;
             }
             memcpy(rt_write_span(c, out, 16), a, 16);
+            c->eax = out; return 1;
+        }
+        rt_set_errno(c, 17);
+    } else if (!strcmp(name, "tempnam")) {
+        // glibc: TMPDIR, caller directory, /tmp, then cwd; prefix <= 5 bytes.
+        uint32_t directory = arg(c, 0), prefix = arg(c, 1);
+        const char *choices[] = {getenv("TMPDIR"), directory ? string(c, directory) : NULL, "/tmp", "."};
+        const char *chosen = NULL, *lead = prefix ? string(c, prefix) : "file";
+        for (unsigned i = 0; i < sizeof(choices)/sizeof(*choices); ++i) {
+            if (!choices[i] || !*choices[i]) continue;
+            const char *resolved = rt_read_path(choices[i]);
+            if (resolved && !stat(resolved, &info) && S_ISDIR(info.st_mode)) { chosen = choices[i]; break; }
+        }
+        c->eax = 0;
+        if (!chosen) { rt_set_errno(c, 2); return 1; }
+        int length = snprintf(b, sizeof(b), "%s/%.*sXXXXXX", chosen, 5, lead);
+        if (length < 0 || length >= (int)sizeof(b)) { rt_set_errno(c, 36); return 1; }
+        static const char letters[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        for (int attempt = 0; attempt < 238328; ++attempt) {
+            for (int i = length - 6; i < length; ++i) b[i] = letters[arc4random_uniform(62)];
+            if (!visible(b, a, &info)) continue;
+            if (errno != ENOENT) { rt_save_errno(c); return 1; }
+            uint32_t out = rt_alloc((uint32_t)length + 1);
+            if (!out) { rt_set_errno(c, 12); return 1; }
+            memcpy(GPTR(out), b, (size_t)length + 1);
             c->eax = out; return 1;
         }
         rt_set_errno(c, 17);

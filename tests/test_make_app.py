@@ -49,6 +49,28 @@ class MakeAppTests(unittest.TestCase):
             make_app.main()
         return dest / 'Portal 2 Natif.app'
 
+    def test_puzzlemaker_sdk_mount_preserves_gameinfo_and_saves(self):
+        game = Path(self.config['game_root'])
+        (game / 'portal2').mkdir(parents=True)
+        original = b'"GameInfo"\r\n{\r\n FileSystem {\r\n  SearchPaths\r\n  {\r\n   Game |gameinfo_path|.\r\n  }\r\n }\r\n}\r\n'
+        (game / 'portal2/gameinfo.txt').write_bytes(original)
+        user = self.tmp / 'userdata'
+        (user / 'portal2/save').mkdir(parents=True)
+        (user / 'portal2/save/quick.sav').write_bytes(b'keep')
+        make_app.prepare_puzzlemaker(game, user)
+        target = user / 'portal2/gameinfo.txt'
+        changed = target.read_bytes()
+        self.assertIn(b'SDKCONTENT\t\t|gameinfo_path|../sdk_content', changed)
+        self.assertIn(b'Game |gameinfo_path|.', changed)
+        self.assertEqual((game / 'portal2/gameinfo.txt').read_bytes(), original)
+        self.assertEqual((user / 'portal2/save/quick.sav').read_bytes(), b'keep')
+        self.assertTrue((user / 'sdk_content/maps').is_dir())
+        make_app.prepare_puzzlemaker(game, user)
+        self.assertEqual(target.read_bytes(), changed)
+        target.write_bytes(changed + b'// custom override\r\n')
+        make_app.prepare_puzzlemaker(game, user)
+        self.assertTrue(target.read_bytes().endswith(b'// custom override\r\n'))
+
     def test_launcher_reads_nothing_from_repo(self):
         app = self.run_main()
         self.assertTrue((app / 'Contents/Resources/language.py').exists())
@@ -69,6 +91,19 @@ class MakeAppTests(unittest.TestCase):
             self.run_main()
         self.assertTrue((app / 'Contents/Info.plist').is_file())   # the previous, complete app
         self.assertFalse(any(p.name.startswith('.') for p in app.parent.iterdir()))
+
+    def test_map_compiler_and_its_matching_images_are_bundled(self):
+        (self.root / 'build/portal2-map-compiler').write_bytes(b'native compiler')
+        prep = self.root / 'build/tools/vbsp/prep'
+        prep.mkdir(parents=True)
+        (prep / 'layout.json').write_text('{}')
+        (prep / 'vbsp_linux').write_bytes(b'prepared vbsp')
+        def bundle(app, binary, executable_name='portal2-native'):
+            (app / 'Contents/MacOS' / executable_name).write_bytes(binary.read_bytes())
+        with mock.patch.object(make_app, 'bundle_libraries', bundle):
+            app = self.run_main()
+        self.assertEqual((app / 'Contents/MacOS/portal2-map-compiler').read_bytes(), b'native compiler')
+        self.assertEqual((app / 'Contents/Resources/map-compiler/prep/vbsp_linux').read_bytes(), b'prepared vbsp')
 
     def test_prep_copied_into_bundle(self):
         app = self.run_main()

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from make_app import prepare_puzzlemaker
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--build', action='store_true')
@@ -35,6 +36,7 @@ if not args.show:
     diag_dir = user_dir.with_name('portal2-userdata-diag')
     if not diag_dir.exists(): shutil.copytree(user_dir, diag_dir, symlinks=True)
     user_dir = diag_dir
+prepare_puzzlemaker(config['game_root'], user_dir)
 command = [str(args.binary.resolve()), '--images', str(Path('build/game/prep').resolve()),
            '--game-dir', config['game_root'], '--linux-root', config['linux_root'],
            '--user-dir', str(user_dir), '--', *game_args]

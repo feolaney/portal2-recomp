@@ -249,6 +249,7 @@ step "Preparing the Linux modules"
 python3 tools/gameprep.py
 step "Recompiling the game (about 10 minutes the first time, seconds afterwards)"
 python3 tools/build_game.py --release
+python3 tools/build_puzzlemaker.py
 step "Creating ~/Applications/Portal 2 Natif.app"
 python3 tools/make_app.py
 

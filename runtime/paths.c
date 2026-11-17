@@ -18,6 +18,7 @@ static _Thread_local unsigned next_buffer;
 static char *buffer(void) { return buffers[next_buffer++ % 4]; }
 static _Atomic unsigned long generation = 1;   // incrémenté à chaque écriture invitée
 unsigned long rt_paths_generation(void) { return generation; }
+void rt_paths_invalidate(void) { ++generation; }
 static int insensitive[3];                       // volume de chaque racine insensible à la casse
 static int within(const char *path,const char *root) {
     size_t length=strlen(root);
@@ -91,6 +92,8 @@ static int absolute_path(const char *path,char *output) {
 int rt_paths_case_insensitive(void) { return insensitive[0] && insensitive[1] && insensitive[2]; }
 // Racine des écritures (sauvegardes, caches) ; chaîne vide avant rt_paths_init.
 const char *rt_user_root(void) { return user_root; }
+const char *rt_game_root(void) { return game_root; }
+const char *rt_linux_root(void) { return linux_root; }
 int rt_paths_init(const char *game,const char *linux,const char *user) {
     ++generation;   // nouvelles racines : caches invalides
     if(!realpath(game,game_root) || !realpath(linux,linux_root))return -1;
@@ -255,6 +258,12 @@ static int lower_directory(const char *relative) {
         if(!stat(candidate,&info) && S_ISDIR(info.st_mode))return 1;
     }
     return 0;
+}
+// Keep the guest's mount-prefix checks consistent with a case-insensitive
+// host volume, without returning the user-overlay spelling to the guest.
+int rt_canonical_game_path(const char *path, char output[PATH_MAX]) {
+    if (!game_root[0] || !insensitive[0] || absolute_path(path, output)) return 0;
+    return within(output, game_root);
 }
 int rt_path_relative(const char *path,char relative[PATH_MAX]) {
     if(!game_root[0])return 0;

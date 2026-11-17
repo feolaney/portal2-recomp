@@ -979,6 +979,8 @@ def generate(layout, exports, objdump, allow_unimplemented=False, disasm_cache=N
                         f'{tls["off"]}u, {tls["filesz"]}u, {tls["memsz"]}u, {tls["align"]}u)) return -1;')
     for item in layout.get('data_imports', []):
         code.append(f'if (rt_init_import_data({json.dumps(item["name"])}, {item["addr"]:#x}u, {item["size"]}u)) return -1;')
+    for item in layout.get("copy_relocations", []):
+        code.append(f'memcpy(GPTR({item["address"]:#x}u), GPTR({item["source"]:#x}u), {item["size"]}u);')
     code.extend(['return 0; }', ''])
     code.append(registry.generate(layout))
     return '\n'.join(code)
@@ -1066,6 +1068,7 @@ NATIVE_OVERRIDES = {
     # ~20 % du thread principal en partie. Inutile ici : APFS est insensible à
     # la casse sur Mac, et paths.c/case_path.c résolvent déjà la casse sur iOS.
     ('filesystem_stdio.so', 0x2df40): ('rt_native_pathmatch', 'PATHMATCH', '5557565383ec0c8b6c24288b5c242c0fb605'),
+    ('filesystem_stdio.so', 0x352d0): ('rt_native_open_for_write', 'WRITEPATH', '57565381ec100200008d84240c010000'),
     # CVEngineServer::GetChangeAccessor (engine.so, entrée 0x180 de sa table) :
     # &sv.edictchangeinfo[NUM_FOR_EDICT(edict)]. Quand on quitte en pleine
     # partie, sv.edicts est déjà à zéro alors que des entités appellent encore
@@ -1412,6 +1415,8 @@ def dispatch_source(layout, selected, imports, functions):
                         f'{tls["off"]}u, {tls["filesz"]}u, {tls["memsz"]}u, {tls["align"]}u)) return -1;')
     for item in layout.get('data_imports', []):
         code.append(f'if (rt_init_import_data({json.dumps(item["name"])}, {item["addr"]:#x}u, {item["size"]}u)) return -1;')
+    for item in layout.get("copy_relocations", []):
+        code.append(f'memcpy(GPTR({item["address"]:#x}u), GPTR({item["source"]:#x}u), {item["size"]}u);')
     code.extend(['return 0; }', ''])
     code.append(registry.generate(layout))
     return '\n'.join(code)

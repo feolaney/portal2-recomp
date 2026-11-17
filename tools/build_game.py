@@ -38,14 +38,16 @@ PE_PLUGINS = ('mssmp3.asi', 'mssvoice.asi', 'binkawin.asi')
 KEEP_CONFIGURATIONS = 2   # objets conservés pour les deux derniers jeux d'options
 
 
-def roots(layout):
-    result = ['portal2_linux:symbol:main']
+def roots(layout, program="portal2_linux"):
+    result = [f'{program}:symbol:main']
     for module in layout['modules']:
         if module['name'] in ('libtier0.so', 'libvstdlib.so', 'portal2_linux'):
             if module['init']: result.append(f'{module["name"]}:init:dt')
             result += [f'{module["name"]}:init:{i}' for i in range(len(module['init_array']))]
     extra = Path('config/game-roots.json')
-    if extra.exists(): result += json.loads(extra.read_text())
+    if extra.exists():
+        modules = {m['name'] for m in layout['modules']}
+        result += [root for root in json.loads(extra.read_text()) if root.split(':')[0] in modules]
     return list(dict.fromkeys(result))
 
 
@@ -67,7 +69,7 @@ def generation_key(layout_path, layout, specs, whole_game):
 
 
 def generate(args, layout, specs):
-    out = Path('build/game/gen')
+    out = args.build_dir / 'gen'
     manifest_path = out / 'manifest.json'
     key = generation_key(args.layout, layout, specs, args.all)
     if manifest_path.exists():
@@ -85,10 +87,10 @@ def generate(args, layout, specs):
     return manifest, time.time() - started
 
 
-def generate_plugins(config_path, log=print):
+def generate_plugins(config_path, log=print, out=None):
     """C relogeable des greffons PE de bin/linux32 (lift.generate_pe), dans
     build/game/gen/pe : un fichier par greffon, réécrit seulement s'il change."""
-    out = Path('build/game/gen/pe')
+    out = Path(out) if out is not None else Path('build/game/gen/pe')
     out.mkdir(parents=True, exist_ok=True)
     config = json.loads(Path(config_path).read_text()) if Path(config_path).exists() else {}
     root = Path(config.get('game_root', '')) / 'bin/linux32'
@@ -252,20 +254,23 @@ def main():
     parser.add_argument('--order-file', type=Path,
                         help="fichier d'ordre de l'éditeur de liens (tools/hot_order.py) : code chaud regroupé")
     parser.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
-    parser.add_argument('--stats', type=Path, default=Path('build/game/build-stats.json'))
+    parser.add_argument('--stats', type=Path)
     parser.add_argument('--config', type=Path, default=Path('config/local.json'),
                         help='game_root : copie du jeu contenant bin/linux32/*.asi (greffons PE)')
+    parser.add_argument('--build-dir', type=Path, default=Path('build/game'))
+    parser.add_argument('--program', default='portal2_linux')
     args = parser.parse_args()
+    if args.stats is None: args.stats = args.build_dir / "build-stats.json"
     if args.release:
         args.opt, args.fast_memory = '2', True
     sys.stdout.reconfigure(line_buffering=True)
     started = time.time()
     layout = json.loads(args.layout.read_text())
     try:
-        manifest, generation_time = generate(args, layout, roots(layout))
+        manifest, generation_time = generate(args, layout, roots(layout, args.program))
     except lift.Unsupported as exc:
         parser.exit(1, f'game lift: {exc}\n')
-    plugin_sources, plugin_stats = generate_plugins(args.config)
+    plugin_sources, plugin_stats = generate_plugins(args.config, out=args.build_dir / "gen/pe")
     imports = {item['addr']: item['name'] for item in layout['imports']}
     unimplemented = sorted({imports[a] for a in manifest['used_imports']} - lift.SHIMS)
     if unimplemented:
@@ -283,19 +288,19 @@ def main():
                    '-Wno-profile-instr-out-of-date', '-Wno-profile-instr-missing']
     runtime_flags = [f'-O{args.runtime_opt or args.opt}', '-g', *WARNINGS, *memory, *profile, '-Iruntime', *HOST_CFLAGS]
     generated_flags = [f'-O{args.opt}', DEBUG[args.debug], *WARNINGS, *memory, *profile, '-Iruntime']
-    sources = Path('build/game/gen/src')
+    sources = args.build_dir / 'gen/src'
     units = [(str(p), runtime_flags) for p in sorted(Path('runtime').glob('*.c'))]
     units.append(('src/main.c', runtime_flags))
     units += [(str(sources / name), generated_flags) for name in sorted(manifest['shards'])]
     units.append((str(sources / 'dispatch.c'), generated_flags))
     units += [(str(p), generated_flags) for p in plugin_sources]
     # Objets instrumentés à part : supprimables d'un bloc une fois le profil extrait.
-    cache = Path('build/game/obj-pgo-generate' if args.pgo_generate else 'build/game/obj')
+    cache = args.build_dir / ('obj-pgo-generate' if args.pgo_generate else 'obj')
     compile_started = time.time()
     objects, compiled, cpu = compile_units(units, cache, args.jobs, identity)
     compile_time = time.time() - compile_started
     link_started = time.time()
-    response = Path('build/game/link.rsp')
+    response = args.build_dir / 'link.rsp'
     response.write_text('\n'.join(str(o) for o in objects) + '\n')
     temporary = args.out.with_name(f'.{args.out.name}.tmp')
     link_flags = (['-fprofile-instr-generate'] if args.pgo_generate else []) + \

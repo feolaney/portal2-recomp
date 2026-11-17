@@ -10,6 +10,9 @@
 #include <TargetConditionals.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <mach-o/dyld.h>
+#include <stdio.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -21,6 +24,48 @@ static uint32_t arg(CPU *c, unsigned i) { return R32(c->esp + 4 + 4 * i); }
 static const char *string(CPU *c, uint32_t address) { rt_string_length(c, address); return GPTR(address); }
 static void finish(CPU *c, int result) { if (result < 0) rt_save_errno(c); c->eax = (uint32_t)result; }
 static void fail(CPU *c, int linux_errno) { rt_set_errno(c, linux_errno); c->eax = UINT32_MAX; }
+
+// Puzzle Maker launches Linux map tools as child processes. Execute the
+// bundled native tool host instead, retaining arguments, pipes and user data.
+const char *rt_map_tool_program(const char *file) {
+    const char *base = strrchr(file, '/'); base = base ? base + 1 : file;
+    if (!strcmp(base, "vbsp_linux")) return "vbsp_linux";
+    if (!strcmp(base, "vvis_linux")) return "vvis_dll.so";
+    if (!strcmp(base, "vrad_linux")) return "vrad_dll.so";
+    return NULL;
+}
+static int exec_map_tool(const char *file, char **original) {
+    const char *program = rt_map_tool_program(file);
+    if (!program || !*rt_game_root()) return 0;
+    char executable[PATH_MAX], compiler[PATH_MAX], images[PATH_MAX];
+    uint32_t size = sizeof(executable);
+    if (_NSGetExecutablePath(executable, &size)) { errno = ENAMETOOLONG; return -1; }
+    char *slash = strrchr(executable, '/');
+    if (!slash) { errno = ENOENT; return -1; }
+    *slash = 0;
+    const char *override = getenv("P2_MAP_COMPILER"), *image_override = getenv("P2_MAP_COMPILER_IMAGES");
+    int n = override ? snprintf(compiler, sizeof(compiler), "%s", override)
+                     : snprintf(compiler, sizeof(compiler), "%s/portal2-map-compiler", executable);
+    if (n < 0 || n >= (int)sizeof(compiler)) { errno = ENAMETOOLONG; return -1; }
+    n = image_override ? snprintf(images, sizeof(images), "%s", image_override)
+                      : snprintf(images, sizeof(images), "%s/../Resources/map-compiler/prep", executable);
+    if (n < 0 || n >= (int)sizeof(images)) { errno = ENAMETOOLONG; return -1; }
+    if (!image_override && access(images, F_OK)) {
+        n = snprintf(images, sizeof(images), "%s/tools/vbsp/prep", executable);
+        if (n < 0 || n >= (int)sizeof(images)) { errno = ENAMETOOLONG; return -1; }
+    }
+    size_t count = 0; while (original[count]) ++count;
+    char **args = calloc(count + 13, sizeof(*args));
+    if (!args) return -1;
+    const char *fixed[] = {compiler, "--images", images, "--game-dir", rt_game_root(),
+        "--linux-root", rt_linux_root(), "--user-dir", rt_user_root(), "--program", program, "--"};
+    for (size_t i = 0; i < 12; ++i) args[i] = (char *)fixed[i];
+    for (size_t i = 1; i < count; ++i) args[11 + i] = original[i];
+    fprintf(stderr, "[map-compiler] %s -> %s\n", file, compiler);
+    execv(compiler, args);
+    int error = errno; free(args); errno = error;
+    return -1;
+}
 
 // Signaux Linux i386 (asm/signal.h) et leurs équivalents Darwin.
 static const struct { int linux_value, darwin; } signal_table[] = {
@@ -179,6 +224,9 @@ static int process_shim(CPU *c, const char *name) {
         pid_t result = waitpid(pid, &status, native); int error = errno;
         if (!(options & 1)) rt_guest_resume(saved);
         errno = error;
+        // A compiler child can create overlay files while the parent still
+        // caches their absence (or a lower-layer path). Refresh on process polls.
+        rt_paths_invalidate();
         if (result > 0 && out) W32(out, rt_linux_wait_status(status));
         finish(c, result);
     } else if (!strcmp(name, "fork")) {
@@ -188,6 +236,7 @@ static int process_shim(CPU *c, const char *name) {
         const char *file = string(c, arg(c, 0));
         char **argv = host_argv(c, arg(c, 1));
         if (!argv) { fail(c, 7); return 1; } // E2BIG
+        if (exec_map_tool(file, argv)) { int error = errno; free(argv); errno = error; finish(c, -1); return 1; }
         const char *resolved = strchr(file, '/') ? rt_read_path(file) : file;
         if (resolved) execvp(resolved, argv);
         int error = errno; free(argv); errno = error;
@@ -206,7 +255,9 @@ static int process_shim(CPU *c, const char *name) {
         FILE *file = rt_stream_take(c, arg(c, 0));
         unsigned saved = rt_guest_suspend();
         int status = pclose(file), error = errno;
+        rt_paths_invalidate();
         rt_guest_resume(saved);
+        rt_paths_invalidate();
         errno = error;
         if (status == -1) finish(c, -1); else c->eax = rt_linux_wait_status(status);
     } else if (!strcmp(name, "system")) {
@@ -220,6 +271,7 @@ static int process_shim(CPU *c, const char *name) {
         int status = system(text), error = errno;
 #endif
         rt_guest_resume(saved);
+        rt_paths_invalidate();
         errno = error;
         if (status == -1) finish(c, -1); else c->eax = rt_linux_wait_status(status);
     } else if (!strcmp(name, "_exit")) {

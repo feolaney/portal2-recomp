@@ -2,6 +2,8 @@
 // NATIVE_OVERRIDES). La fonction traduite reste disponible : P2_NATIVE_<NOM>=0
 // la rétablit (comparaison A/B, repli si un remplacement pose problème).
 #include "rt.h"
+#include "posix.h"
+#include "modules.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -35,6 +37,29 @@ int rt_native_pathmatch(CPU *c, uint32_t entry) {
     uint32_t out = R32(c->esp + 8);
     if (out) W32(out, 0);
     c->eax = 0;
+    rt_return(c);
+    return 1;
+}
+
+// CBaseFileSystem::OpenForWrite(this, name, mode, pathID). VVIS/VRAD
+// lowercase absolute map names, but the Linux filesystem checks mounted
+// prefixes case-sensitively before fopen. Canonicalize only the game root on
+// case-insensitive volumes, then execute the original function and its checks.
+int rt_native_open_for_write(CPU *c, uint32_t entry) {
+    static _Thread_local int active;
+    if (active) return 0;
+    uint32_t args[4];
+    for (unsigned i = 0; i < 4; ++i) args[i] = R32(c->esp + 4 + 4*i);
+    rt_string_length(c, args[1]);
+    const char *path = GPTR(args[1]); char canonical[PATH_MAX];
+    if (path[0] != '/' || !rt_canonical_game_path(path, canonical) || !strcmp(path, canonical)) return 0;
+    uint32_t rewritten = rt_alloc((uint32_t)strlen(canonical) + 1);
+    if (!rewritten) return 0;
+    strcpy(GPTR(rewritten), canonical); args[1] = rewritten;
+    active = 1;
+    c->eax = rt_invoke(c, entry, args, 4);
+    active = 0;
+    rt_free(rewritten);
     rt_return(c);
     return 1;
 }
